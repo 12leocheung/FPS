@@ -557,7 +557,8 @@ function initAudio(){
   listener = AC.listener;
   masterGain = AC.createGain(); masterGain.gain.value = 0.8;
   masterGain.connect(AC.destination);
-  const len = AC.sampleRate * 1.2;
+  // Ensure the buffer length is an exact integer
+  const len = Math.floor(AC.sampleRate * 1.2);
   noiseBuf = AC.createBuffer(1, len, AC.sampleRate);
   const d = noiseBuf.getChannelData(0);
   for (let i = 0; i < len; i++) d[i] = Math.random()*2 - 1;
@@ -931,12 +932,71 @@ let scoped = false, mouseDown = false;
 let camAdsOffset = 0; 
 let camBob = 0;
 
+let started = false, isPaused = true, lastT = now(), nextAmbient = 0;
 const keys = {};
+
+// ---------- input / pointer lock (WITH FALLBACK) ----------
+const menu = document.getElementById('menu');
+const hud = document.getElementById('hud');
+
+function resumeGame() {
+  isPaused = false;
+  menu.style.display = 'none';
+  hud.style.display = 'block';
+  if (!started) { started = true; startGame(); }
+}
+
+function pauseGame() {
+  isPaused = true;
+  menu.style.display = 'flex';
+  hud.style.display = 'none';
+}
+
+document.getElementById('play').addEventListener('click', () => {
+  initAudio();
+  if (AC && AC.state === 'suspended') AC.resume();
+  
+  // Try to request pointer lock. It often fails in sandboxed iframes.
+  try {
+    canvas.requestPointerLock();
+  } catch(e) {}
+  
+  // Start/Resume regardless of pointer lock success!
+  resumeGame();
+});
+
+canvas.addEventListener('click', () => {
+  if (isPaused) return; // Don't try locking while paused on menu
+  if (document.pointerLockElement !== canvas) {
+    try { canvas.requestPointerLock(); } catch(e) {}
+  }
+});
+
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement === canvas) {
+    resumeGame();
+  } else {
+    // Escaping pointer lock pauses the game
+    pauseGame();
+  }
+});
+
+// Fallback logic for when pointer lock is completely blocked
 addEventListener('keydown', e => { 
   keys[e.code] = true; 
   if (e.code === 'KeyR') tryReload(); 
   
-  if (!started && document.pointerLockElement !== canvas) {
+  // Allow manual pause via Escape if pointer lock isn't doing it natively
+  if (e.code === 'Escape') {
+    if (document.pointerLockElement === canvas) {
+      document.exitPointerLock(); 
+    } else {
+      pauseGame();
+    }
+  }
+
+  // Developer code logic
+  if (!started && isPaused) {
     if (e.code === secretCode[secretIndex]) {
       secretIndex++;
       if (secretIndex === secretCode.length) {
@@ -948,7 +1008,30 @@ addEventListener('keydown', e => {
     }
   }
 });
-addEventListener('keyup',   e => { keys[e.code] = false; });
+
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+addEventListener('mousemove', e => {
+  // Check our manual pause flag instead of strictly relying on pointer lock!
+  if (isPaused) return;
+  
+  const sens = 0.0021 * (scoped ? 0.3 : 1);
+  player.yaw   -= e.movementX * sens;
+  player.pitch -= e.movementY * sens;
+  player.pitch = clamp(player.pitch, -1.5, 1.5);
+});
+
+addEventListener('mousedown', e => {
+  if (isPaused) return;
+  if (e.button === 0){ mouseDown = true; shoot(); }
+  if (e.button === 2) scoped = true;
+});
+
+addEventListener('mouseup', e => {
+  if (e.button === 0) mouseDown = false;
+  if (e.button === 2) scoped = false;
+});
+addEventListener('contextmenu', e => e.preventDefault());
 
 function playerEmit(kind, pos, scale = 1){
   const t = now();
@@ -1273,16 +1356,7 @@ function tryReload(){
   playerEmit('RELOAD', _v1);
   audio.reload(null, true);
 }
-addEventListener('mousedown', e => {
-  if (document.pointerLockElement !== canvas) return;
-  if (e.button === 0){ mouseDown = true; shoot(); }
-  if (e.button === 2) scoped = true;
-});
-addEventListener('mouseup', e => {
-  if (e.button === 0) mouseDown = false;
-  if (e.button === 2) scoped = false;
-});
-addEventListener('contextmenu', e => e.preventDefault());
+
 
 // ---------- damage / death ----------
 const flashEl = document.getElementById('flash');
@@ -1357,45 +1431,20 @@ function winGame(){
   updateHUD();
 }
 
-// ---------- input / pointer lock ----------
-const menu = document.getElementById('menu');
-const hud = document.getElementById('hud');
-document.getElementById('play').addEventListener('click', () => {
-  initAudio();
-  if (AC.state === 'suspended') AC.resume();
-  canvas.requestPointerLock();
-});
-canvas.addEventListener('click', () => {
-  if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
-});
-document.addEventListener('pointerlockchange', () => {
-  const locked = document.pointerLockElement === canvas;
-  menu.style.display = locked ? 'none' : 'flex';
-  hud.style.display = locked ? 'block' : 'none';
-  if (locked && !started){ started = true; startGame(); }
-});
-addEventListener('mousemove', e => {
-  if (document.pointerLockElement !== canvas) return;
-  const sens = 0.0021 * (scoped ? 0.3 : 1);
-  player.yaw   -= e.movementX * sens;
-  player.pitch -= e.movementY * sens;
-  player.pitch = clamp(player.pitch, -1.5, 1.5);
-});
-
 // ---------- game loop ----------
-let started = false, lastT = now(), nextAmbient = 0;
 function startGame(){
   for (let i = 0; i < 4; i++) makeBot();
   nextAmbient = now() + 3;
   updateHUD();
 }
+
 function tick(){
   requestAnimationFrame(tick);
   const t = now();
   const dt = Math.min(t - lastT, 0.05);
   lastT = t;
-  const paused = document.pointerLockElement !== canvas;
-  if (!started || paused){ field.update(t); renderer.render(scene, camera); return; }
+  
+  if (!started || isPaused){ field.update(t); renderer.render(scene, camera); return; }
 
   // ---- player ----
   if (player.alive){
